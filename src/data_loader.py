@@ -290,12 +290,12 @@ class SteelMicrostructureDataset(Dataset):
     def __getitem__(self, idx: int) -> tuple[torch.Tensor, int]: #carrega uma imagem
         arr = load_image(self.paths[idx], self.grayscale, self.image_size)
         x = torch.from_numpy(arr).permute(2, 0, 1).contiguous() #transforma a array em um tensor pytorch e troca os eixos
+        if self.transform is not None:
+            x = self.transform(x)        
         if self.mean is not None and self.std is not None:
             x = (x - self.mean) / self.std
         if x.shape[0] == 1 and self.out_channels == 3: #cinza para 3 dimensões
             x = x.expand(3, -1, -1).contiguous()
-        if self.transform is not None:
-            x = self.transform(x)
         return x, self.labels[idx]
 
 
