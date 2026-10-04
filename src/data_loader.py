@@ -114,6 +114,34 @@ def build_dataframe(
     df["label"] = df["Phase"].map(CLASS_TO_IDX)
     if df["label"].isna().any():
         warnings.warn(f"Unknown phases: {sorted(df.loc[df['label'].isna(), 'Phase'].unique())}")
+    return add_region_id(df)
+
+
+ROI_KEY = ["SampleIDHarm", "MicroscopeID", "Magnification", "EtchingID"]
+
+
+def add_region_id(df: pd.DataFrame) -> pd.DataFrame:
+    """Add ``roi_id`` and ``region_id``: the same physical area across acquisition settings.
+
+    The same ROI is photographed once per setting (aperture, filter, exposure, objective),
+    and each photo gets a new, *consecutive* ``ID``. So a run of consecutive IDs within
+    ``ROI_KEY`` is one ROI, and ``(ROI, Phase, PatchID)`` is one physical region.
+    Checked on the images: same PatchID across settings has pixel correlation ~0.8,
+    different patches or different ROIs ~0.
+    """
+    ids = df[ROI_KEY + ["ID"]].drop_duplicates("ID").sort_values("ID")
+    ids["roi_block"] = ids.groupby(ROI_KEY)["ID"].transform(lambda s: (s.diff() != 1).cumsum())
+    df = df.merge(ids[["ID", "roi_block"]], on="ID", how="left")
+
+    df["roi_id"] = (
+        df["SampleIDHarm"] + "_m" + df["MicroscopeID"].astype(str) + "_" + df["Magnification"]
+        + "_e" + df["EtchingID"].astype(str) + "_b" + df["roi_block"].astype(str)
+    )
+    df["region_id"] = df["roi_id"] + "_" + df["Phase"] + "_" + df["PatchID"].astype(str).str.zfill(2)
+    df = df.drop(columns="roi_block")
+
+    # One patch per region per photo; otherwise the key does not identify a unique area.
+    assert not df.duplicated(["region_id", "ID"]).any(), "region_id is not unique within an acquisition"
     return df
 
 
@@ -169,6 +197,10 @@ def make_splits(
     assert not groups["train"] & groups["val"], "Group leakage between train and val" #valida se teve vazamento de dados
     assert not groups["train"] & groups["test"], "Group leakage between train and test"
     assert not groups["val"] & groups["test"], "Group leakage between val and test"
+    if "region_id" in df.columns:
+        regions = [set(part["region_id"]) for part in (train, val, test)]
+        assert not (regions[0] & regions[1] or regions[0] & regions[2] or regions[1] & regions[2]), \
+            "Same physical region in more than one split"
     return train, val, test
 
 
@@ -282,11 +314,14 @@ if __name__ == "__main__":
     print("\nPatches per microscope x magnification:")
     print(pd.crosstab(df["MicroscopeID"], df["Magnification"]))
 
+    versions = df.groupby("region_id").size()
+    print(f"\nPhysical regions: {len(versions)} | versions per region: {versions.value_counts().sort_index().to_dict()}")
+
     print("\nClean baseline split (microscope 0, 20x):")
     subset = filter_dataset(df, microscope_id=0, magnification="20x")
     train, val, test = make_splits(subset)
     for name, part in [("train", train), ("val", val), ("test", test)]:
-        print(describe_split(name, part))
+        print(describe_split(name, part) + f" | {part['region_id'].nunique()} regions")
 
     print("\nCross-microscope split (train on 0, test on 2, 20x):")
     splits = make_cross_microscope_splits(df, train_microscope=0, test_microscope=2, magnification="20x")
